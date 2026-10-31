@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>agent-runtime · harness</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">agent-runtime<span>extra</span></div>
+    <button id="new" class="new">＋ 新对话</button>
+    <nav id="threads" class="threads"></nav>
+    <div class="foot">
+      <div id="mode" class="mode">连接中…</div>
+      <div class="hint">新建对话 = 新建一个库。这里不提供删除。</div>
+    </div>
+  </aside>
+  <main class="main">
+    <header class="top">
+      <div class="title">
+        <h1 id="title">新对话</h1>
+        <div id="meta" class="meta"></div>
+      </div>
+      <div id="live" class="live"></div>
+    </header>
+    <div id="stream" class="stream">
+      <div class="empty">
+        <p>这个 runtime 有情绪和记忆。</p>
+        <p class="dim">说一句话，它会检索、评估、写入，然后回答。运行链默认折叠在回答上方。</p>
+      </div>
+    </div>
+    <form id="composer" class="composer">
+      <textarea id="input" rows="1" placeholder="说点什么…（Enter 发送，Shift+Enter 换行）"></textarea>
+      <button id="send" type="submit">发送</button>
+    </form>
+  </main>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
