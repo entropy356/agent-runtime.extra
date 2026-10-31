@@ -69,6 +69,15 @@ async function selectThread(id) {
   state.thread = thread;
   paintHeader(thread);
   paintMessages(thread.messages);
+  if (thread.active) {
+    // The step kept running while the page was away; pick its log back up.
+    const placeholder = assistantNode({ events: [], phase: '处理', now: 0 }, true);
+    $('stream').append(placeholder);
+    toBottom(true);
+    pollRun(thread.active, placeholder, thread.id).catch(() => {
+      placeholder.querySelector('.answer').textContent = '这一轮的执行记录不在内存里了（服务重启过），刷新看看结果。';
+    });
+  }
 }
 
 function paintHeader(thread) {
@@ -107,7 +116,7 @@ function assistantNode(message, running) {
   const answer = el('div', 'answer');
   if (message.error) {
     answer.classList.add('error');
-    answer.textContent = '这一轮失败：' + message.error;
+    answer.textContent = '这一轮没有通过校验，状态没有改变。\n' + message.error;
   } else if (message.answer) {
     answer.textContent = message.answer;
   }
@@ -150,7 +159,12 @@ function chainNode(message, running) {
     if (trace && trace.written_ids.length) stat(`写入 ${trace.written_ids.length}`);
     if (trace && trace.replaced_ids.length) stat(`替代 ${trace.replaced_ids.length}`);
     dur.textContent = message.elapsed != null ? `已处理 ${message.elapsed.toFixed(1)}s` : '';
-    if (trace) stages.append(...doneStages(trace, events, message));
+    if (trace) {
+      stages.append(...doneStages(trace, events, message));
+    } else {
+      label.textContent = '运行链 · 中断';
+      stages.append(...runningStages(events));
+    }
   }
   chain.addEventListener('toggle', () => { chain.dataset.user = chain.open ? '1' : '0'; });
   return chain;
@@ -161,7 +175,8 @@ function runningStages(events) {
   const out = [];
   events.forEach((e) => {
     if (e.kind === 'embed') {
-      out.push(stage({ name: '嵌入', metric: `${e.dim} 维 · ${e.task}`, ms: e.ms, dot: 'ok' }));
+      const kind = { query: '输入', document: '记忆', plain: '评估' }[e.task] || e.task;
+      out.push(stage({ name: '嵌入', metric: `${e.dim} 维 · ${kind}`, ms: e.ms, dot: 'ok' }));
     } else if (e.kind === 'cognize_start') {
       out.push(stage({ name: '调用模型', metric: `上下文 ${e.context_ids.length} 条 · 库 ${e.library_size}`,
         dot: 'hot' }));
@@ -444,6 +459,8 @@ $('new').addEventListener('click', async () => {
 
 (async function boot() {
   const threads = await loadThreads();
-  if (threads.length) await selectThread(threads[0].id);
+  const wanted = FLAGS.get('thread');
+  if (wanted && threads.some((t) => t.id === wanted)) await selectThread(wanted);
+  else if (threads.length) await selectThread(threads[0].id);
   else await selectThread((await api('/api/threads', { method: 'POST' })).id);
 })();

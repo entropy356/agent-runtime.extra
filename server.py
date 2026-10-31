@@ -41,8 +41,12 @@ class Tracer:
     """Collects what the runtime did while a step ran. Timing and payloads only:
     it reads the provider's structured result, never a raw reasoning stream."""
 
-    def __init__(self, sink, limit=200):
-        self.sink, self.limit = sink, limit
+    PHASES = {"cognize_start": "模型认知", "cognition": "校验结果",
+              "recall_request": "要求再检索", "embed": "嵌入输入"}
+
+    def __init__(self, run, limit=200):
+        self.run, self.limit = run, limit
+        self.sink = run["events"]
         self.t0 = time.perf_counter()
 
     def emit(self, kind, **fields):
@@ -51,6 +55,11 @@ class Tracer:
         self.sink.append({"seq": len(self.sink) + 1,
                           "at": round(time.perf_counter() - self.t0, 3),
                           "kind": kind, **fields})
+        phase = self.PHASES.get(kind)
+        if kind == "embed" and fields.get("task") != "query":
+            phase = "写入记忆"
+        if phase:
+            self.run["phase"] = phase
 
 
 class Instrumented:
@@ -148,6 +157,8 @@ class Session:
         self.lock = threading.RLock()
         self._runtime = None
         self.running = False
+        self.active = None
+        self.cached = None
 
     @property
     def runtime(self):
@@ -160,6 +171,21 @@ class Session:
         tmp = self.meta_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(self.meta, ensure_ascii=False), encoding="utf-8")
         tmp.replace(self.meta_path)
+
+    def snapshot(self):
+        # Reading the database mid-step would queue behind the write transaction.
+        if self.running:
+            # Mid-step: last committed numbers, never a blocking read.
+            if self.cached:
+                return self.cached
+            if "step" in self.meta:
+                return {"step": self.meta["step"], "library": self.meta.get("library", 0),
+                        "memories": []}
+            return {"step": 0, "library": 0, "memories": []}
+        state = self.runtime.inspect()["state"]
+        self.cached = {"step": state["step"], "library": len(state["memories"]),
+                       "memories": slim_rows(state["memories"])}
+        return self.cached
 
     def summary(self):
         last = next((m for m in reversed(self.meta["messages"]) if m["role"] == "user"), None)
@@ -207,16 +233,19 @@ def start_run(session, text):
            "started": time.time(), "elapsed": None}
     with LOCK:
         RUNS[(session.id, run_id)] = run
+    session.active = run_id
 
     def work():
         with session.lock:
             session.running = True
-            tracer = Tracer(run["events"])
+            tracer = Tracer(run)
             CURRENT.tracer = tracer
             try:
                 run["phase"] = "读取状态"
                 trace = session.runtime.step(text)
                 state = session.runtime.inspect()["state"]
+                session.cached = {"step": state["step"], "library": len(state["memories"]),
+                                  "memories": slim_rows(state["memories"])}
                 run["trace"] = slim_trace(trace, state["memories"])
                 run["answer"] = trace["cognition"]["answer"]
                 run["status"] = "done"
@@ -226,6 +255,8 @@ def start_run(session, text):
                     "trace": run["trace"], "events": run["events"],
                     "elapsed": run["elapsed"], "error": None, "at": time.time()})
                 session.meta["turns"] = session.meta.get("turns", 0) + 1
+                session.meta["step"] = state["step"]
+                session.meta["library"] = len(state["memories"])
                 session.save_meta()
             except Exception as error:  # surfaced to the viewer, never hidden
                 run["status"] = "error"
@@ -238,6 +269,7 @@ def start_run(session, text):
                 session.save_meta()
             finally:
                 session.running = False
+                session.active = None
                 CURRENT.tracer = None
 
     threading.Thread(target=work, daemon=True).start()
@@ -300,12 +332,10 @@ class Handler(BaseHTTPRequestHandler):
             session = get_session(match.group(1))
             if session is None:
                 return self.send_json(404, {"error": "会话不存在"})
-            state = session.runtime.inspect()["state"]
             return self.send_json(200, {
                 "id": session.id, "title": session.meta["title"],
                 "messages": session.meta["messages"], "running": session.running,
-                "state": {"step": state["step"], "library": len(state["memories"]),
-                          "memories": slim_rows(state["memories"])}})
+                "active": session.active, "state": session.snapshot()})
         match = RUN.match(path)
         if match:
             run = RUNS.get((match.group(1), match.group(2)))
