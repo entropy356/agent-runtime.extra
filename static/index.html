@@ -10,11 +10,20 @@
 <div class="app">
   <aside class="sidebar">
     <div class="brand">agent-runtime<span>extra</span></div>
+    <div id="switch" class="switch">
+      <button class="tab" data-backend="demo1">情绪记忆</button>
+      <button class="tab" data-backend="demo2">记忆动力学</button>
+    </div>
     <button id="new" class="new">＋ 新对话</button>
+    <div id="modes" class="modes" hidden>
+      <button data-mode="two-state">＋ 双状态</button>
+      <button data-mode="weight-only">＋ 单权重</button>
+    </div>
     <nav id="threads" class="threads"></nav>
     <div class="foot">
       <div id="mode" class="mode">连接中…</div>
       <div class="hint">新建对话 = 新建一个库。这里不提供删除。</div>
+      <button id="openLogs" class="ghost">日志 / 评分记录</button>
     </div>
   </aside>
   <main class="main">
@@ -27,7 +36,7 @@
     </header>
     <div id="stream" class="stream">
       <div class="empty">
-        <p>这个 runtime 有情绪和记忆。</p>
+        <p>这个 runtime 有记忆。</p>
         <p class="dim">说一句话，它会检索、评估、写入，然后回答。运行链默认折叠在回答上方。</p>
       </div>
     </div>
@@ -37,6 +46,20 @@
     </form>
   </main>
 </div>
+
+<div id="drawer" class="drawer" hidden>
+  <div class="drawer-head">
+    <b>日志</b>
+    <span class="tiny">每次运行、每次模型调用、每条评分</span>
+    <button id="closeLogs" class="close" aria-label="关闭">×</button>
+  </div>
+  <div id="logBody" class="drawer-body"></div>
+  <div class="drawer-foot">
+    <a href="/api/logs/export">导出 JSONL</a>
+    <span class="tiny">评分和评价只进日志，不回传给 runtime</span>
+  </div>
+</div>
+
 <script src="/static/app.js"></script>
 </body>
 </html>

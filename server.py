@@ -1,11 +1,16 @@
-"""A DeepSeek-harness-like front end for the emotion/memory runtime.
+"""Two runtimes, one harness.
 
-One process, one port. Chat on top, the runtime's own run chain underneath, folded
-by default. Each conversation is its own database. There is no delete endpoint:
-threads can be created and continued, never removed from here.
+demo1  emotion + memory      ../agent-runtime/demos/demo1-emotion-memory
+demo2  memory dynamics       ../pr7-demo2/demos/demo2-memory-dynamics   (PR#7 branch)
 
-The runtime package is imported, not modified; it lives in a sibling checkout:
-    AGENT_RUNTIME_PATH  default ../agent-runtime/demos/demo1-emotion-memory
+Chat on top, the runtime's own run chain folded underneath. Every conversation is
+its own database. There is no delete endpoint: threads can be created and
+continued, never removed from here.
+
+Everything is also appended to logs/*.jsonl:
+    runs.jsonl     one line per turn, with the full trace
+    calls.jsonl    one line per provider call (embed / cognize), with timing
+    ratings.jsonl  human score + note on an answer; never fed back to the runtime
 """
 import json
 import math
@@ -20,20 +25,46 @@ from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
-DATA.mkdir(exist_ok=True)
+LOG_DIR = BASE / "logs"
+for folder in (DATA, LOG_DIR):
+    folder.mkdir(exist_ok=True)
 
-RUNTIME_PATH = os.environ.get("AGENT_RUNTIME_PATH") or str(
+DEMO1_PATH = os.environ.get("AGENT_RUNTIME_PATH") or str(
     BASE.parent / "agent-runtime" / "demos" / "demo1-emotion-memory")
-sys.path.insert(0, RUNTIME_PATH)
+DEMO2_PATH = os.environ.get("DYNAMICS_RUNTIME_PATH") or str(
+    BASE.parent / "pr7-demo2" / "demos" / "demo2-memory-dynamics")
+for path in (DEMO2_PATH, DEMO1_PATH):
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
 from agent_runtime.providers import APIProvider  # noqa: E402
-from agent_runtime.runtime import Runtime  # noqa: E402
+from agent_runtime.runtime import Runtime as EmotionRuntime  # noqa: E402
+from memory_dynamics.model import DynamicsConfig  # noqa: E402
+from memory_dynamics.providers import APIProvider as DynamicsProvider  # noqa: E402
+from memory_dynamics.runtime import Runtime as DynamicsRuntime  # noqa: E402
 
-PROVIDER = APIProvider()
 CURRENT = threading.local()
 SESSIONS = {}
 RUNS = {}
 LOCK = threading.RLock()
+
+RUN_LOG = LOG_DIR / "runs.jsonl"
+CALL_LOG = LOG_DIR / "calls.jsonl"
+RATING_LOG = LOG_DIR / "ratings.jsonl"
+
+BACKENDS = {
+    "demo1": {"label": "情绪记忆", "data": DATA / "demo1"},
+    "demo2": {"label": "记忆动力学", "data": DATA / "demo2"},
+}
+for spec in BACKENDS.values():
+    spec["data"].mkdir(exist_ok=True)
+
+
+def append_log(path, record):
+    line = json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n"
+    with LOCK:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line)
 
 
 # ---------------------------------------------------------------- instrumentation
@@ -44,8 +75,9 @@ class Tracer:
     PHASES = {"cognize_start": "模型认知", "cognition": "校验结果",
               "recall_request": "要求再检索", "embed": "嵌入输入"}
 
-    def __init__(self, run, limit=200):
-        self.run, self.limit = run, limit
+    def __init__(self, run, thread, backend, limit=200):
+        self.run, self.thread, self.backend = run, thread, backend
+        self.limit = limit
         self.sink = run["events"]
         self.t0 = time.perf_counter()
 
@@ -61,9 +93,21 @@ class Tracer:
         if phase:
             self.run["phase"] = phase
 
+    def call(self, kind, started, status, **fields):
+        append_log(CALL_LOG, {
+            "ts": round(time.time(), 3), "thread": self.thread, "run": self.run["id"],
+            "backend": self.backend, "kind": kind,
+            "ms": int((time.perf_counter() - started) * 1000),
+            "status": status, **fields})
 
-class Instrumented:
-    """Pass-through provider that notes call boundaries and results."""
+
+def _note(status, tracer, kind, started, **fields):
+    if tracer:
+        tracer.call(kind, started, status, **fields)
+
+
+class InstrumentedEmotion:
+    """Pass-through provider for demo1: notes call boundaries and results."""
 
     def __init__(self, inner):
         self.inner = inner
@@ -73,10 +117,16 @@ class Instrumented:
     def embed(self, text, task=None):
         tracer = getattr(CURRENT, "tracer", None)
         started = time.perf_counter()
-        vector = self.inner.embed(text, task)
+        try:
+            vector = self.inner.embed(text, task)
+        except Exception as error:
+            _note("error:" + error.__class__.__name__, tracer, "embed", started,
+                  task=task or "plain", detail=str(error)[:200])
+            raise
         if tracer:
             tracer.emit("embed", task=task or "plain", dim=len(vector),
                         ms=int((time.perf_counter() - started) * 1000))
+            tracer.call("embed", started, "ok", task=task or "plain", dim=len(vector))
         return vector
 
     def cognize(self, text, memories, recall_left=0, library_size=None):
@@ -85,46 +135,106 @@ class Instrumented:
             tracer.emit("cognize_start", context_ids=[m["id"] for m in memories],
                         recall_left=recall_left, library_size=library_size)
         started = time.perf_counter()
-        result = self.inner.cognize(text, memories, recall_left, library_size)
+        try:
+            result = self.inner.cognize(text, memories, recall_left, library_size)
+        except Exception as error:
+            _note("error:" + error.__class__.__name__, tracer, "cognize", started,
+                  context=len(memories), detail=str(error)[:200])
+            raise
         if tracer:
             asked = isinstance(result, dict) and "recall" in result
             tracer.emit("recall_request" if asked else "cognition",
                         ms=int((time.perf_counter() - started) * 1000),
                         payload=result if asked else {k: result.get(k) for k in
                                                       ("answer", "appraisal", "used_memory_ids", "memories")})
+            tracer.call("cognize", started, "ok", context=len(memories), recall=asked)
         return result
 
 
-PROVIDER = Instrumented(PROVIDER)
+class InstrumentedDynamics:
+    """Pass-through provider for demo2 (its cognize takes no recall budget)."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.mode = inner.mode
+        self.profile = inner.profile
+
+    @property
+    def chat_profile(self):
+        return getattr(self.inner, "chat_profile", None)
+
+    def embed(self, text, task=None):
+        tracer = getattr(CURRENT, "tracer", None)
+        started = time.perf_counter()
+        try:
+            vector = self.inner.embed(text, task)
+        except Exception as error:
+            _note("error:" + error.__class__.__name__, tracer, "embed", started,
+                  task=task or "plain", detail=str(error)[:200])
+            raise
+        if tracer:
+            tracer.emit("embed", task=task or "plain", dim=len(vector),
+                        ms=int((time.perf_counter() - started) * 1000))
+            tracer.call("embed", started, "ok", task=task or "plain", dim=len(vector))
+        return vector
+
+    def cognize(self, text, memories):
+        tracer = getattr(CURRENT, "tracer", None)
+        if tracer:
+            tracer.emit("cognize_start", context_ids=[m["id"] for m in memories],
+                        recall_left=0, library_size=None)
+        started = time.perf_counter()
+        try:
+            result = self.inner.cognize(text, memories)
+        except Exception as error:
+            _note("error:" + error.__class__.__name__, tracer, "cognize", started,
+                  context=len(memories), detail=str(error)[:200])
+            raise
+        if tracer:
+            tracer.emit("cognition", ms=int((time.perf_counter() - started) * 1000),
+                        payload={k: result.get(k) for k in
+                                 ("answer", "used_memory_ids", "memories")})
+            tracer.call("cognize", started, "ok", context=len(memories))
+        return result
+
+
+PROVIDERS = {
+    "demo1": InstrumentedEmotion(APIProvider()),
+    "demo2": InstrumentedDynamics(DynamicsProvider()),
+}
 
 
 # ---------------------------------------------------------------- slim projections
-MEMORY_FIELDS = ("id", "content", "appraisal", "created_step", "origin", "uses",
-                 "write_strength", "relevance", "emotion_match", "read_strength",
-                 "score", "selected", "selected_by", "usage_frequency", "replaces",
-                 "source_memory_ids")
+EMOTION_FIELDS = ("id", "content", "appraisal", "created_step", "origin", "uses",
+                  "write_strength", "relevance", "emotion_match", "read_strength",
+                  "score", "selected", "selected_by", "usage_frequency", "replaces",
+                  "source_memory_ids")
+
+DYNAMICS_FIELDS = ("id", "content", "weight", "stability", "created_step",
+                   "activated_count", "last_activated_step", "relevance", "score",
+                   "selected", "weight_before", "weight_after",
+                   "effective_decay_rate", "stability_before", "stability_after",
+                   "stability_gain")
+
+FLOAT_FIELDS = ("write_strength", "relevance", "emotion_match", "read_strength",
+                "score", "weight", "stability", "weight_before", "weight_after",
+                "effective_decay_rate", "stability_before", "stability_after",
+                "stability_gain")
 
 
-def slim_rows(rows):
+def slim(rows, fields):
     out = []
     for row in rows or []:
-        item = {k: row.get(k) for k in MEMORY_FIELDS if k in row}
-        for key in ("write_strength", "relevance", "emotion_match", "read_strength", "score"):
+        item = {k: row.get(k) for k in fields if k in row}
+        for key in FLOAT_FIELDS:
             if isinstance(item.get(key), float):
                 item[key] = round(item[key], 4)
         out.append(item)
     return out
 
 
-def emotion_note(before, after):
-    def norm(vector):
-        return round(math.sqrt(sum(v * v for v in vector)), 4) if vector else None
-    drift = None
-    if before and after:
-        dot = sum(a * b for a, b in zip(before, after))
-        n = (norm(before) or 0) * (norm(after) or 0)
-        drift = round(max(0.0, 1 - dot / n), 4) if n else None
-    return {"from_norm": norm(before), "to_norm": norm(after), "drift": drift}
+def slim_rows(rows):
+    return slim(rows, EMOTION_FIELDS)
 
 
 def slim_trace(trace, memories=()):
@@ -149,11 +259,40 @@ def slim_trace(trace, memories=()):
     }
 
 
+def slim_trace_dynamics(trace, memories=()):
+    written = [m for m in memories if m["id"] in trace["written_ids"]]
+    return {
+        "step": trace["step"],
+        "input": trace["input"],
+        "mode": trace["mode"],
+        "config": trace["config"],
+        "decayed": slim(trace["decayed"], DYNAMICS_FIELDS),
+        "retrieval": slim(trace["retrieval"], DYNAMICS_FIELDS),
+        "cognition": trace["cognition"],
+        "activated": slim(trace["activated"], DYNAMICS_FIELDS),
+        "written": slim(written, DYNAMICS_FIELDS),
+        "written_ids": trace["written_ids"],
+    }
+
+
+def emotion_note(before, after):
+    def norm(vector):
+        return round(math.sqrt(sum(v * v for v in vector)), 4) if vector else None
+    drift = None
+    if before and after:
+        dot = sum(a * b for a, b in zip(before, after))
+        n = (norm(before) or 0) * (norm(after) or 0)
+        drift = round(max(0.0, 1 - dot / n), 4) if n else None
+    return {"from_norm": norm(before), "to_norm": norm(after), "drift": drift}
+
+
 # ---------------------------------------------------------------- sessions
 class Session:
-    def __init__(self, sid, meta):
+    def __init__(self, backend, sid, meta):
+        self.backend = backend
         self.id, self.meta = sid, meta
-        self.db, self.meta_path = DATA / f"{sid}.sqlite3", DATA / f"{sid}.json"
+        folder = BACKENDS[backend]["data"]
+        self.db, self.meta_path = folder / f"{sid}.sqlite3", folder / f"{sid}.json"
         self.lock = threading.RLock()
         self._runtime = None
         self.running = False
@@ -161,10 +300,18 @@ class Session:
         self.cached = None
 
     @property
+    def provider(self):
+        return PROVIDERS[self.backend]
+
+    @property
     def runtime(self):
         with self.lock:
             if self._runtime is None:
-                self._runtime = Runtime(self.db, PROVIDER, 0.85, 2)
+                if self.backend == "demo1":
+                    self._runtime = EmotionRuntime(self.db, self.provider, 0.85, 2)
+                else:
+                    config = DynamicsConfig(mode=self.meta.get("mode", "two-state"))
+                    self._runtime = DynamicsRuntime(self.db, self.provider, config)
             return self._runtime
 
     def save_meta(self):
@@ -183,45 +330,60 @@ class Session:
                         "memories": []}
             return {"step": 0, "library": 0, "memories": []}
         state = self.runtime.inspect()["state"]
+        fields = EMOTION_FIELDS if self.backend == "demo1" else DYNAMICS_FIELDS
         self.cached = {"step": state["step"], "library": len(state["memories"]),
-                       "memories": slim_rows(state["memories"])}
+                       "memories": slim(state["memories"], fields)}
         return self.cached
 
     def summary(self):
         last = next((m for m in reversed(self.meta["messages"]) if m["role"] == "user"), None)
-        return {"id": self.id, "title": self.meta["title"], "created": self.meta["created"],
-                "messages": len(self.meta["messages"]),
+        rated = [m for m in self.meta["messages"] if m.get("rating")]
+        return {"id": self.id, "backend": self.backend, "title": self.meta["title"],
+                "created": self.meta["created"], "messages": len(self.meta["messages"]),
                 "preview": (last or {}).get("text", "")[:60],
-                "turns": self.meta.get("turns", 0)}
+                "turns": self.meta.get("turns", 0),
+                "ratings": len(rated),
+                "mode": self.meta.get("mode")}
 
 
 def load_sessions():
-    for path in DATA.glob("*.json"):
-        sid = path.stem
-        if sid in SESSIONS:
-            continue
-        try:
-            meta = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        SESSIONS[sid] = Session(sid, meta)
+    for backend, spec in BACKENDS.items():
+        for path in spec["data"].glob("*.json"):
+            sid = path.stem
+            if (backend, sid) in SESSIONS:
+                continue
+            try:
+                meta = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            SESSIONS[(backend, sid)] = Session(backend, sid, meta)
 
 
 def get_session(sid):
     with LOCK:
-        session = SESSIONS.get(sid)
-        if session is None and (DATA / f"{sid}.json").exists():
-            session = SESSIONS[sid] = Session(sid, json.loads((DATA / f"{sid}.json").read_text()))
-        return session
+        for backend in BACKENDS:
+            session = SESSIONS.get((backend, sid))
+            if session is not None:
+                return session
+        for backend, spec in BACKENDS.items():
+            path = spec["data"] / f"{sid}.json"
+            if path.exists():
+                session = SESSIONS[(backend, sid)] = Session(
+                    backend, sid, json.loads(path.read_text(encoding="utf-8")))
+                return session
+        return None
 
 
-def new_session():
+def new_session(backend, mode=None):
     sid = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
-    meta = {"id": sid, "title": "新对话", "created": time.time(), "messages": [], "turns": 0}
-    session = Session(sid, meta)
+    meta = {"id": sid, "title": "新对话", "created": time.time(), "messages": [],
+            "turns": 0, "backend": backend}
+    if backend == "demo2":
+        meta["mode"] = mode if mode in ("two-state", "weight-only") else "two-state"
+    session = Session(backend, sid, meta)
     session.save_meta()
     with LOCK:
-        SESSIONS[sid] = session
+        SESSIONS[(backend, sid)] = session
     return session
 
 
@@ -229,7 +391,7 @@ def new_session():
 def start_run(session, text):
     run_id = uuid.uuid4().hex[:12]
     run = {"id": run_id, "status": "running", "phase": "准备", "events": [],
-           "answer": None, "trace": None, "error": None,
+           "answer": None, "trace": None, "error": None, "backend": session.backend,
            "started": time.time(), "elapsed": None}
     with LOCK:
         RUNS[(session.id, run_id)] = run
@@ -238,22 +400,26 @@ def start_run(session, text):
     def work():
         with session.lock:
             session.running = True
-            tracer = Tracer(run)
+            tracer = Tracer(run, session.id, session.backend)
             CURRENT.tracer = tracer
             try:
                 run["phase"] = "读取状态"
                 trace = session.runtime.step(text)
                 state = session.runtime.inspect()["state"]
+                fields = EMOTION_FIELDS if session.backend == "demo1" else DYNAMICS_FIELDS
                 session.cached = {"step": state["step"], "library": len(state["memories"]),
-                                  "memories": slim_rows(state["memories"])}
-                run["trace"] = slim_trace(trace, state["memories"])
+                                  "memories": slim(state["memories"], fields)}
+                run["trace"] = (slim_trace(trace, state["memories"])
+                                if session.backend == "demo1"
+                                else slim_trace_dynamics(trace, state["memories"]))
                 run["answer"] = trace["cognition"]["answer"]
                 run["status"] = "done"
                 run["elapsed"] = round(time.perf_counter() - tracer.t0, 3)
                 session.meta["messages"].append({
-                    "role": "assistant", "run": run_id, "answer": run["answer"],
-                    "trace": run["trace"], "events": run["events"],
-                    "elapsed": run["elapsed"], "error": None, "at": time.time()})
+                    "role": "assistant", "run": run_id, "backend": session.backend,
+                    "answer": run["answer"], "trace": run["trace"],
+                    "events": run["events"], "elapsed": run["elapsed"],
+                    "error": None, "at": time.time()})
                 session.meta["turns"] = session.meta.get("turns", 0) + 1
                 session.meta["step"] = state["step"]
                 session.meta["library"] = len(state["memories"])
@@ -263,11 +429,17 @@ def start_run(session, text):
                 run["error"] = str(error) or error.__class__.__name__
                 run["elapsed"] = round(time.perf_counter() - tracer.t0, 3)
                 session.meta["messages"].append({
-                    "role": "assistant", "run": run_id, "answer": None, "trace": None,
-                    "events": run["events"], "elapsed": run["elapsed"],
-                    "error": run["error"], "at": time.time()})
+                    "role": "assistant", "run": run_id, "backend": session.backend,
+                    "answer": None, "trace": None, "events": run["events"],
+                    "elapsed": run["elapsed"], "error": run["error"], "at": time.time()})
                 session.save_meta()
             finally:
+                append_log(RUN_LOG, {
+                    "ts": round(time.time(), 3), "thread": session.id, "run": run_id,
+                    "backend": session.backend, "step": (run["trace"] or {}).get("step"),
+                    "input": text, "answer": run["answer"], "elapsed": run["elapsed"],
+                    "status": run["status"], "error": run["error"],
+                    "trace": run["trace"], "events": run["events"]})
                 session.running = False
                 session.active = None
                 CURRENT.tracer = None
@@ -280,6 +452,22 @@ def start_run(session, text):
 THREADS = re.compile(r"^/api/threads/([\w.-]+)$")
 MESSAGES = re.compile(r"^/api/threads/([\w.-]+)/messages$")
 RUN = re.compile(r"^/api/threads/([\w.-]+)/runs/([\w.-]+)$")
+RATING = re.compile(r"^/api/threads/([\w.-]+)/messages/([\w.-]+)/rating$")
+SEED = re.compile(r"^/api/threads/([\w.-]+)/seed$")
+NOTHING = re.compile(r"^$")
+
+
+def tail_jsonl(path, limit):
+    if not path.exists():
+        return []
+    lines = path.read_text(encoding="utf-8").splitlines()[-limit:]
+    out = []
+    for line in lines:
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -303,9 +491,20 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_text(self, text, content_type, filename=None):
+        body = text.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        if filename:
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.end_headers()
+        self.wfile.write(body)
+
     def body(self):
         size = int(self.headers.get("Content-Length") or 0)
-        if not 0 < size <= 20000:
+        if not 0 < size <= 40000:
             raise ValueError("请求体为空或过大")
         data = json.loads(self.rfile.read(size))
         if not isinstance(data, dict):
@@ -313,7 +512,12 @@ class Handler(BaseHTTPRequestHandler):
         return data
 
     def do_GET(self):
-        path = self.path.split("?", 1)[0]
+        path, _, query = self.path.partition("?")
+        params = {}
+        for part in query.split("&"):
+            if "=" in part:
+                key, value = part.split("=", 1)
+                params[key] = value
         if path in ("/", "/index.html"):
             return self.send_file(BASE / "static" / "index.html", "text/html; charset=utf-8")
         if path == "/static/app.js":
@@ -322,18 +526,55 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_file(BASE / "static" / "style.css", "text/css; charset=utf-8")
         if path == "/api/threads":
             load_sessions()
+            backend = params.get("backend") or "demo1"
+            if backend not in BACKENDS:
+                return self.send_json(400, {"error": "没有这个后端"})
             with LOCK:
-                items = sorted((s.summary() for s in SESSIONS.values()),
+                items = sorted((s.summary() for (b, _), s in SESSIONS.items() if b == backend),
                                key=lambda item: item["created"], reverse=True)
-            return self.send_json(200, {"threads": items, "mode": PROVIDER.mode,
-                                        "profile": PROVIDER.profile})
+            provider = PROVIDERS[backend]
+            return self.send_json(200, {"threads": items, "backend": backend,
+                                        "mode": provider.mode, "profile": provider.profile,
+                                        "label": BACKENDS[backend]["label"]})
+        if path == "/api/logs":
+            try:
+                limit = max(1, min(300, int(params.get("limit", "40"))))
+            except ValueError:
+                limit = 40
+            runs = tail_jsonl(RUN_LOG, limit)
+            summary = [{
+                "ts": row.get("ts"), "thread": row.get("thread"), "run": row.get("run"),
+                "backend": row.get("backend"), "step": row.get("step"),
+                "input": (row.get("input") or "")[:120],
+                "answer": (row.get("answer") or "")[:200],
+                "elapsed": row.get("elapsed"), "status": row.get("status"),
+                "error": row.get("error"),
+                "used": ((row.get("trace") or {}).get("cognition") or {}).get("used_memory_ids"),
+            } for row in runs]
+            ratings = {}
+            for row in tail_jsonl(RATING_LOG, 500):
+                ratings[(row.get("thread"), row.get("run"))] = row
+            for row in summary:
+                hit = ratings.get((row["thread"], row["run"]))
+                if hit:
+                    row["rating"] = {"score": hit.get("score"), "note": hit.get("note")}
+            return self.send_json(200, {"runs": summary, "log": str(RUN_LOG),
+                                        "calls": len(tail_jsonl(CALL_LOG, 100000))})
+        if path == "/api/logs/export":
+            text = ""
+            for file in (RUN_LOG, CALL_LOG, RATING_LOG):
+                if file.exists():
+                    text += file.read_text(encoding="utf-8")
+            return self.send_text(text, "application/x-ndjson; charset=utf-8",
+                                  "harness-logs.jsonl")
         match = THREADS.match(path)
         if match:
             session = get_session(match.group(1))
             if session is None:
                 return self.send_json(404, {"error": "会话不存在"})
             return self.send_json(200, {
-                "id": session.id, "title": session.meta["title"],
+                "id": session.id, "title": session.meta["title"], "backend": session.backend,
+                "mode": session.meta.get("mode"),
                 "messages": session.meta["messages"], "running": session.running,
                 "active": session.active, "state": session.snapshot()})
         match = RUN.match(path)
@@ -351,8 +592,13 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         try:
             if path == "/api/threads":
-                session = new_session()
-                return self.send_json(200, {"id": session.id, "title": session.meta["title"]})
+                data = self.body()
+                backend = data.get("backend") or "demo1"
+                if backend not in BACKENDS:
+                    raise ValueError("没有这个后端")
+                session = new_session(backend, data.get("mode"))
+                return self.send_json(200, {"id": session.id, "title": session.meta["title"],
+                                            "backend": backend, "mode": session.meta.get("mode")})
             match = MESSAGES.match(path)
             if match:
                 session = get_session(match.group(1))
@@ -372,6 +618,49 @@ class Handler(BaseHTTPRequestHandler):
                     session.save_meta()
                 run = start_run(session, text.strip())
                 return self.send_json(200, {"run": run["id"], "thread": session.id})
+            match = RATING.match(path)
+            if match:
+                session = get_session(match.group(1))
+                if session is None:
+                    return self.send_json(404, {"error": "会话不存在"})
+                data = self.body()
+                score = data.get("score")
+                note = data.get("note") or ""
+                if type(score) is not int or not 1 <= score <= 5:
+                    raise ValueError("评分需为 1–5 的整数")
+                if not isinstance(note, str) or len(note) > 1000:
+                    raise ValueError("评价最多 1000 字")
+                target = next((m for m in session.meta["messages"]
+                               if m.get("role") == "assistant" and m.get("run") == match.group(2)),
+                              None)
+                if target is None:
+                    return self.send_json(404, {"error": "没有这一轮"})
+                rating = {"score": score, "note": note.strip(), "at": time.time()}
+                target["rating"] = rating
+                session.save_meta()
+                append_log(RATING_LOG, {
+                    "ts": round(time.time(), 3), "thread": session.id,
+                    "run": match.group(2), "backend": session.backend,
+                    "step": (target.get("trace") or {}).get("step"),
+                    "input": next((m.get("text") for m in reversed(session.meta["messages"])
+                                   if m.get("role") == "user"), None),
+                    "answer": target.get("answer"), **rating})
+                return self.send_json(200, {"rating": rating})
+            match = SEED.match(path)
+            if match:
+                session = get_session(match.group(1))
+                if session is None:
+                    return self.send_json(404, {"error": "会话不存在"})
+                if session.backend != "demo2":
+                    raise ValueError("只有记忆动力学后端支持初始化记忆")
+                contents = self.body().get("contents")
+                if not isinstance(contents, list) or not contents:
+                    raise ValueError("请给出至少一条记忆")
+                result = session.runtime.initialize(contents)
+                append_log(LOG_DIR / "seeds.jsonl", {
+                    "ts": round(time.time(), 3), "thread": session.id,
+                    "backend": session.backend, **result})
+                return self.send_json(200, result)
             if path.startswith("/api/"):
                 # No delete endpoint by design: a thread's database is not removed from here.
                 return self.send_json(404, {"error": "没有这个地址"})
@@ -379,7 +668,7 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError) as error:
             return self.send_json(400, {"error": str(error)})
         except Exception as error:
-            return self.send_json(500, {"error": f"操作失败：{error.__class__.__name__}"})
+            return self.send_json(500, {"error": f"操作失败：{error.__class__.__name__}：{error}"})
 
     def do_DELETE(self):
         # Explicitly unsupported. Deleting a conversation would delete its database.
@@ -394,5 +683,6 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8090"))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     server.daemon_threads = True
-    print(f"harness on 0.0.0.0:{port} [{PROVIDER.mode}] runtime={RUNTIME_PATH}", flush=True)
+    print(f"harness on 0.0.0.0:{port} [{PROVIDERS['demo1'].mode}] "
+          f"demo1={DEMO1_PATH} demo2={DEMO2_PATH}", flush=True)
     server.serve_forever()
