@@ -46,6 +46,8 @@ ENV_FILE=~/agent-env.sh PORT=8090 ./run.sh
 
 **记忆动力学**
 
+![记忆动力学的运行链](docs/run-chain-demo2.png)
+
 | 段 | 里面是什么 |
 |---|---|
 | 输入嵌入 | 同上 |
