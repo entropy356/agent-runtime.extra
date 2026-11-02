@@ -347,6 +347,42 @@ tr.out td { opacity: .55; }
 }
 .composer:focus-within { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
 
+/* ---------------------------------------------------------------- draft bar */
+.draftbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  max-width: 760px;
+  width: calc(100% - 52px);
+  margin: 0 auto 8px;
+  padding: 7px 9px 7px 13px;
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line));
+  border-radius: 10px;
+  font-size: 12px;
+}
+.draftbar[hidden] { display: none; }
+.draftinfo { flex: 1; color: var(--accent); }
+.draft-clear,
+.draft-send {
+  flex: none;
+  padding: 4px 11px;
+  font: inherit;
+  font-size: 12px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.draft-clear { color: var(--muted); background: transparent; border: 1px solid var(--line); }
+.draft-clear:hover { color: var(--text); border-color: var(--muted); }
+.draft-send { color: #fff; background: var(--accent); border: 1px solid transparent; font-weight: 600; }
+.draft-send:disabled { opacity: .6; cursor: default; }
+.rate-status { color: var(--faint); font-size: 11.5px; }
+.rate-status.hot { color: var(--warn); }
+
+@media (max-width: 780px) {
+  .draftbar { width: calc(100% - 32px); }
+}
+
 textarea {
   flex: 1;
   max-height: 160px;

@@ -4,6 +4,7 @@ const FLAGS = new URLSearchParams(location.search);
 const state = {
   backend: FLAGS.get('backend') === 'demo2' ? 'demo2' : 'demo1',
   threads: [], current: null, thread: null, poll: null, busy: false,
+  drafts: {},
 };
 
 /* ------------------------------------------------------------------ helpers */
@@ -101,11 +102,13 @@ async function setBackend(name) {
 async function selectThread(id) {
   state.current = id;
   if (state.poll) { clearTimeout(state.poll); state.poll = null; }
+  loadDrafts(id);
   renderThreads();
   const thread = await api('/api/threads/' + id);
   state.thread = thread;
   paintHeader(thread);
   paintMessages(thread.messages);
+  syncDraftBar();
   if (thread.active) {
     // The step kept running while the page was away; pick its log back up.
     const placeholder = assistantNode({ events: [], phase: '处理', now: 0 }, true);
@@ -206,61 +209,171 @@ function assistantNode(message, running) {
   return wrap;
 }
 
-/* Score and note are logged, never fed back into the runtime. */
-function ratingNode(message, runId) {
+/* ---------------------------------------------------------- rating draft
+   Scores are drafted in the browser first. Nothing reaches the server until
+   the user presses 发送, and a batch can rewrite judgements from earlier turns.
+   They are logged, never fed back into the runtime. */
+function draftsKey(threadId) { return 'harness.draft.' + threadId; }
+
+function loadDrafts(threadId) {
+  state.drafts = {};
+  if (!threadId) return;
+  try {
+    const raw = JSON.parse(localStorage.getItem(draftsKey(threadId)) || '{}');
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) state.drafts = raw;
+  } catch (error) { state.drafts = {}; }
+}
+
+function persistDrafts() {
+  if (state.current) {
+    const keys = Object.keys(state.drafts);
+    if (keys.length) localStorage.setItem(draftsKey(state.current), JSON.stringify(state.drafts));
+    else localStorage.removeItem(draftsKey(state.current));
+  }
+  syncDraftBar();
+}
+
+function pendingDrafts() {
+  return Object.entries(state.drafts)
+    .filter(([, d]) => d && d.score)
+    .map(([run, d]) => ({ run, score: d.score, note: (d.note || '').trim() }));
+}
+
+function messageByRun(runId) {
+  const list = (state.thread && state.thread.messages) || [];
+  return list.find((m) => m.role === 'assistant' && m.run === runId) || null;
+}
+
+function setDraft(runId, patch, keepEditor) {
+  // A draft starts from whatever is already on the server, so editing only the
+  // score does not wipe the note that came with it.
+  let base = state.drafts[runId];
+  if (!base) {
+    const saved = (messageByRun(runId) || {}).rating;
+    base = saved ? { score: saved.score, note: saved.note || '' } : {};
+  }
+  state.drafts[runId] = { ...base, ...patch, at: Date.now() };
+  persistDrafts();
+  repaintRating(runId, keepEditor);
+}
+
+function repaintRating(runId, keepEditor) {
+  const host = document.querySelector(`.msg.assistant[data-run="${runId}"]`);
+  const old = host && host.querySelector('.rating');
+  if (!old) return;
+  const message = messageByRun(runId) || {};
+  old.replaceWith(ratingNode(message, runId, keepEditor));
+}
+
+function syncDraftBar() {
+  const items = pendingDrafts();
+  const bar = $('draftbar');
+  const info = $('draftinfo');
+  bar.hidden = !items.length;
+  if (!items.length) return;
+  const rewrites = items.filter(({ run }) => {
+    const saved = (messageByRun(run) || {}).rating;
+    const draft = state.drafts[run];
+    return saved && (saved.score !== draft.score || (saved.note || '') !== (draft.note || ''));
+  }).length;
+  const bits = [`${items.length} 条评分待发送`];
+  if (rewrites) bits.push(`其中 ${rewrites} 条是改的`);
+  if (Object.keys(state.drafts).length > items.length) bits.push('有未打分的草稿');
+  info.textContent = bits.join(' · ');
+}
+
+function ratingNode(message, runId, keepEditor) {
   const wrap = el('div', 'rating');
-  const current = message.rating || {};
+  const saved = message.rating || null;
+  const draft = state.drafts[runId] || null;
+  const shown = draft || saved || {};
+  const changed = !!draft && (!saved
+    || saved.score !== draft.score
+    || (saved.note || '') !== (draft.note || ''));
+
   wrap.append(el('span', 'rate-label', '评分'));
   const stars = el('span', 'stars');
   for (let i = 1; i <= 5; i += 1) {
-    const b = el('button', 'star' + (current.score >= i ? ' on' : ''), String(i));
-    b.title = ['很差', '较差', '一般', '不错', '很好'][i - 1];
-    b.onclick = () => submitRating(message, runId, i, current.note || '');
+    const b = el('button', 'star' + (shown.score >= i ? ' on' : ''), String(i));
+    b.title = ['很差', '较差', '一般', '不错', '很好'][i - 1] + '（改完要点发送）';
+    b.onclick = () => setDraft(runId, { score: i }, keepEditor);
     stars.append(b);
   }
   wrap.append(stars);
 
-  const noteBtn = el('button', 'note-btn', current.note ? '评价 · 已写' : '＋ 评价');
+  const noteBtn = el('button', 'note-btn', (shown.note ? '评价 · 已写' : '＋ 评价'));
   const editor = el('div', 'rate-editor');
-  editor.hidden = true;
+  editor.hidden = !keepEditor;
   const ta = document.createElement('textarea');
   ta.rows = 2;
-  ta.placeholder = '这条回答好在哪、差在哪（只写入日志）';
-  ta.value = current.note || '';
-  const save = el('button', 'save', '保存评价');
+  ta.placeholder = '这条回答好在哪、差在哪（先点分数）';
+  ta.value = shown.note || '';
+  const save = el('button', 'save', '记下');
   save.onclick = () => {
-    if (!current.score) {
+    const score = (state.drafts[runId] || {}).score || shown.score;
+    if (!score) {
       ta.placeholder = '先点上面的分数，再写评价';
       return;
     }
-    submitRating(message, runId, current.score, ta.value);
+    setDraft(runId, { score, note: ta.value }, true);
   };
   editor.append(ta, save);
+  const noteText = shown.note ? el('span', 'rate-note', shown.note) : null;
+  if (noteText) noteText.hidden = !editor.hidden;
   noteBtn.onclick = () => {
     editor.hidden = !editor.hidden;
+    if (noteText) noteText.hidden = !editor.hidden;
     if (!editor.hidden) ta.focus();
   };
   wrap.append(noteBtn);
-  if (current.note) wrap.append(el('span', 'rate-note', current.note));
+  if (changed) {
+    const tag = el('span', 'rate-status hot', saved ? '已改 · 待发送' : '待发送');
+    wrap.append(tag);
+  } else if (saved) {
+    wrap.append(el('span', 'rate-status', '已提交 ' + fmtTime(saved.at)));
+  }
+  if (noteText) wrap.append(noteText);
   wrap.append(editor);
-  wrap.append(el('span', 'tiny', '只写日志，不进入 runtime'));
+  wrap.append(el('span', 'tiny', saved && !changed ? '再点一次可改，改了要重新发送' : '暂存在浏览器，发送后进日志'));
   return wrap;
 }
 
-async function submitRating(message, runId, score, note) {
+async function flushDrafts() {
+  const items = pendingDrafts();
+  if (!items.length) return;
+  const btn = $('draftSend');
+  btn.disabled = true;
+  btn.textContent = '发送中…';
   try {
-    const res = await api(`/api/threads/${state.current}/messages/${runId}/rating`, {
+    const res = await api(`/api/threads/${state.current}/ratings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ score, note }),
+      body: JSON.stringify({ ratings: items }),
     });
-    message.rating = res.rating;
-    const host = document.querySelector(`.msg.assistant[data-run="${runId}"]`);
-    const old = host && host.querySelector('.rating');
-    if (old) old.replaceWith(ratingNode(message, runId));
+    Object.entries(res.ratings).forEach(([run, rating]) => {
+      const message = messageByRun(run);
+      if (message) message.rating = rating;
+      delete state.drafts[run];
+    });
+    persistDrafts();
+    Object.keys(res.ratings).forEach((run) => repaintRating(run));
+    await refreshThumb(state.current);
   } catch (error) {
-    alert('评分没有保存：' + error.message);
+    alert('没有发送成功：' + error.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '发送';
+    syncDraftBar();
   }
+}
+
+function discardDrafts() {
+  const runs = Object.keys(state.drafts);
+  if (!runs.length) return;
+  if (!confirm(`撤销 ${runs.length} 条还没发送的评分？`)) return;
+  state.drafts = {};
+  persistDrafts();
+  runs.forEach((run) => repaintRating(run));
 }
 
 /* ------------------------------------------------------------------ run chain */
@@ -835,6 +948,8 @@ document.querySelectorAll('#modes button').forEach((b) => {
 });
 
 $('openLogs').addEventListener('click', openLogs);
+$('draftSend').addEventListener('click', flushDrafts);
+$('draftClear').addEventListener('click', discardDrafts);
 $('closeLogs').addEventListener('click', () => { $('drawer').hidden = true; });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') $('drawer').hidden = true;

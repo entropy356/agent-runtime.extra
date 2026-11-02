@@ -40,6 +40,11 @@
         <p class="dim">说一句话，它会检索、评估、写入，然后回答。运行链默认折叠在回答上方。</p>
       </div>
     </div>
+    <div id="draftbar" class="draftbar" hidden>
+      <span id="draftinfo" class="draftinfo"></span>
+      <button id="draftClear" class="draft-clear" type="button">撤销</button>
+      <button id="draftSend" class="draft-send" type="button">发送</button>
+    </div>
     <form id="composer" class="composer">
       <textarea id="input" rows="1" placeholder="说点什么…（Enter 发送，Shift+Enter 换行）"></textarea>
       <button id="send" type="submit">发送</button>

@@ -63,7 +63,18 @@ ENV_FILE=~/agent-env.sh PORT=8090 ./run.sh
 ## 评分与评价
 
 每条回答下面有 1–5 分和一段评价。**它们只写日志，不回传给 runtime**，不影响权重、情绪、检索。
-分数点了就存，评价单独保存；改分或改评价都会追加一条记录。
+
+打分先**暂存在浏览器**（`localStorage`，按会话分开）：点星、写评价都只是改草稿，
+刷新页面、切走再回来都还在，可以反悔。改完的回答上会标「已改 · 待发送」，
+输入框上方出现一条提示条，写着这次要发几条、其中几条是改的。
+
+按「发送」才**一次性整批发给服务端**：一个请求、一个 batch id，服务端一次写盘，
+每条追加一行日志，并记下它替换掉的旧分数和旧评价。历史评价因此是可改的，
+但日志是只增不改的——你能看到「先打 5 分、后改 3 分」的完整轨迹。
+
+按「撤销」清掉全部草稿，回到服务端上一次提交的样子。
+
+![评分先暂存在浏览器](docs/rating-draft.png)
 
 ## 日志
 
@@ -73,7 +84,7 @@ ENV_FILE=~/agent-env.sh PORT=8090 ./run.sh
 |---|---|
 | `runs.jsonl` | 一轮的完整 trace：输入、回答、step、耗时、事件、引用 |
 | `calls.jsonl` | 一次 provider 调用：`embed` / `cognize`、耗时、上下文条数、成功或错误 |
-| `ratings.jsonl` | 一次评分或评价：分数、文字、对应的问题和回答 |
+| `ratings.jsonl` | 一次提交里的一条：分数、文字、问题、回答、`batch`、被替换的旧分数 |
 | `seeds.jsonl` | 一次初始化：写入了哪些记忆 |
 
 界面左下「日志 / 评分记录」看最近 80 轮，`/api/logs/export` 下载全部 JSONL。
@@ -93,7 +104,8 @@ ENV_FILE=~/agent-env.sh PORT=8090 ./run.sh
 | GET | `/api/threads/<id>` | 会话消息 + 当前库状态 |
 | POST | `/api/threads/<id>/messages` | 发一句话，返回 run id |
 | GET | `/api/threads/<id>/runs/<run>` | 轮询这一轮：状态、阶段、事件、trace |
-| POST | `/api/threads/<id>/messages/<run>/rating` | `{score: 1-5, note}`，只进日志 |
+| POST | `/api/threads/<id>/ratings` | 批量：`{ratings: [{run, score, note}]}`，一次 1–200 条，只进日志 |
+| POST | `/api/threads/<id>/messages/<run>/rating` | 单条：`{score: 1-5, note}`，老接口，仍在 |
 | POST | `/api/threads/<id>/seed` | 仅 demo2：初始化记忆，仅限空库 |
 | GET | `/api/logs` | 最近的运行摘要与评分 |
 | GET | `/api/logs/export` | 全部 JSONL |

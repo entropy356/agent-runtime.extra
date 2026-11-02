@@ -448,11 +448,76 @@ def start_run(session, text):
     return run
 
 
+# ---------------------------------------------------------------- ratings
+def check_ratings(session, items):
+    """Validate a batch without touching state. Returns {run: (message, rating)}."""
+    if not isinstance(items, list) or not 1 <= len(items) <= 200:
+        raise ValueError("一次请发送 1–200 条评分")
+    targets = {}
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("每条评分需为对象")
+        run = item.get("run")
+        score = item.get("score")
+        note = item.get("note") or ""
+        if not isinstance(run, str) or not run:
+            raise ValueError("缺少 run id")
+        if run in targets:
+            raise ValueError(f"同一轮只能有一条评分：{run}")
+        if type(score) is not int or not 1 <= score <= 5:
+            raise ValueError("评分需为 1–5 的整数")
+        if not isinstance(note, str) or len(note) > 1000:
+            raise ValueError("评价最多 1000 字")
+        target = next((m for m in session.meta["messages"]
+                       if m.get("role") == "assistant" and m.get("run") == run), None)
+        if target is None:
+            raise ValueError(f"没有这一轮：{run}")
+        targets[run] = (target, {"score": score, "note": note.strip()})
+    return targets
+
+
+def question_before(messages, target):
+    try:
+        index = messages.index(target)
+    except ValueError:
+        return None
+    for earlier in reversed(messages[:index]):
+        if earlier.get("role") == "user":
+            return earlier.get("text")
+    return None
+
+
+def apply_ratings(session, targets):
+    """Write the batch, one log line per rating. History is append-only."""
+    now = time.time()
+    batch = uuid.uuid4().hex[:8]
+    applied = {}
+    with session.lock:
+        for run, (target, rating) in targets.items():
+            previous = target.get("rating") or {}
+            entry = {**rating, "at": now}
+            target["rating"] = entry
+            applied[run] = entry
+            append_log(RATING_LOG, {
+                "ts": round(now, 3), "batch": batch, "thread": session.id,
+                "run": run, "backend": session.backend,
+                "step": (target.get("trace") or {}).get("step"),
+                "input": question_before(session.meta["messages"], target),
+                "answer": target.get("answer"),
+                # A rewrite of an earlier judgement keeps both lines.
+                "replaces_score": previous.get("score"),
+                "replaces_note": previous.get("note"),
+                **rating})
+        session.save_meta()
+    return applied, batch
+
+
 # ---------------------------------------------------------------- http
 THREADS = re.compile(r"^/api/threads/([\w.-]+)$")
 MESSAGES = re.compile(r"^/api/threads/([\w.-]+)/messages$")
 RUN = re.compile(r"^/api/threads/([\w.-]+)/runs/([\w.-]+)$")
 RATING = re.compile(r"^/api/threads/([\w.-]+)/messages/([\w.-]+)/rating$")
+RATINGS = re.compile(r"^/api/threads/([\w.-]+)/ratings$")
 SEED = re.compile(r"^/api/threads/([\w.-]+)/seed$")
 NOTHING = re.compile(r"^$")
 
@@ -618,34 +683,26 @@ class Handler(BaseHTTPRequestHandler):
                     session.save_meta()
                 run = start_run(session, text.strip())
                 return self.send_json(200, {"run": run["id"], "thread": session.id})
+            match = RATINGS.match(path)
+            if match:
+                session = get_session(match.group(1))
+                if session is None:
+                    return self.send_json(404, {"error": "会话不存在"})
+                items = self.body().get("ratings")
+                targets = check_ratings(session, items)
+                applied, batch = apply_ratings(session, targets)
+                return self.send_json(200, {"ratings": applied, "batch": batch})
             match = RATING.match(path)
             if match:
                 session = get_session(match.group(1))
                 if session is None:
                     return self.send_json(404, {"error": "会话不存在"})
                 data = self.body()
-                score = data.get("score")
-                note = data.get("note") or ""
-                if type(score) is not int or not 1 <= score <= 5:
-                    raise ValueError("评分需为 1–5 的整数")
-                if not isinstance(note, str) or len(note) > 1000:
-                    raise ValueError("评价最多 1000 字")
-                target = next((m for m in session.meta["messages"]
-                               if m.get("role") == "assistant" and m.get("run") == match.group(2)),
-                              None)
-                if target is None:
-                    return self.send_json(404, {"error": "没有这一轮"})
-                rating = {"score": score, "note": note.strip(), "at": time.time()}
-                target["rating"] = rating
-                session.save_meta()
-                append_log(RATING_LOG, {
-                    "ts": round(time.time(), 3), "thread": session.id,
-                    "run": match.group(2), "backend": session.backend,
-                    "step": (target.get("trace") or {}).get("step"),
-                    "input": next((m.get("text") for m in reversed(session.meta["messages"])
-                                   if m.get("role") == "user"), None),
-                    "answer": target.get("answer"), **rating})
-                return self.send_json(200, {"rating": rating})
+                run = match.group(2)
+                targets = check_ratings(session, [{"run": run, "score": data.get("score"),
+                                                   "note": data.get("note")}])
+                applied, batch = apply_ratings(session, targets)
+                return self.send_json(200, {"rating": applied[run], "batch": batch})
             match = SEED.match(path)
             if match:
                 session = get_session(match.group(1))
