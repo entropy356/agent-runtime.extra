@@ -10,6 +10,6 @@ for candidate in "${ENV_FILE:-}" "$BASE/.env"; do
     set +a
   fi
 done
-export AGENT_RUNTIME_PATH="${AGENT_RUNTIME_PATH:-$BASE/../agent-runtime/demos/demo1-emotion-memory}"
+export AGENT_RUNTIME_PATH="${AGENT_RUNTIME_PATH:-$BASE/../e-m-c/demos/demo1-emotion-memory}"
 export DYNAMICS_RUNTIME_PATH="${DYNAMICS_RUNTIME_PATH:-$BASE/../pr7-demo2/demos/demo2-memory-dynamics}"
 exec python3 "$BASE/server.py"

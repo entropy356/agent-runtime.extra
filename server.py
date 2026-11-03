@@ -1,7 +1,8 @@
-"""Two runtimes, one harness.
+"""One runtime, one harness.
 
-demo1  emotion + memory      ../agent-runtime/demos/demo1-emotion-memory
-demo2  memory dynamics       ../pr7-demo2/demos/demo2-memory-dynamics   (PR#7 branch)
+demo1  emotion + memory      ../e-m-c/demos/demo1-emotion-memory
+
+demo2（memory dynamics）随 codex/demo2-memory-dynamics 分支与 PR #7 删除，后端不再注册。
 
 Chat on top, the runtime's own run chain folded underneath. Every conversation is
 its own database. There is no delete endpoint: threads can be created and
@@ -30,18 +31,22 @@ for folder in (DATA, LOG_DIR):
     folder.mkdir(exist_ok=True)
 
 DEMO1_PATH = os.environ.get("AGENT_RUNTIME_PATH") or str(
-    BASE.parent / "agent-runtime" / "demos" / "demo1-emotion-memory")
-DEMO2_PATH = os.environ.get("DYNAMICS_RUNTIME_PATH") or str(
-    BASE.parent / "pr7-demo2" / "demos" / "demo2-memory-dynamics")
-for path in (DEMO2_PATH, DEMO1_PATH):
-    if path not in sys.path:
-        sys.path.insert(0, path)
+    BASE.parent / "e-m-c" / "demos" / "demo1-emotion-memory")
+if DEMO1_PATH not in sys.path:
+    sys.path.insert(0, DEMO1_PATH)
 
 from agent_runtime.providers import APIProvider  # noqa: E402
 from agent_runtime.runtime import Runtime as EmotionRuntime  # noqa: E402
-from memory_dynamics.model import DynamicsConfig  # noqa: E402
-from memory_dynamics.providers import APIProvider as DynamicsProvider  # noqa: E402
-from memory_dynamics.runtime import Runtime as DynamicsRuntime  # noqa: E402
+
+# demo2 的代码随分支一起删了，这里降级为可选：没有 memory_dynamics 就只跑 demo1。
+try:
+    from memory_dynamics.model import DynamicsConfig  # noqa: E402
+    from memory_dynamics.providers import APIProvider as DynamicsProvider  # noqa: E402
+    from memory_dynamics.runtime import Runtime as DynamicsRuntime  # noqa: E402
+    DYNAMICS_AVAILABLE = True
+except ModuleNotFoundError:
+    DYNAMICS_AVAILABLE = False
+    DynamicsConfig = DynamicsProvider = DynamicsRuntime = None
 
 CURRENT = threading.local()
 SESSIONS = {}
@@ -56,6 +61,8 @@ BACKENDS = {
     "demo1": {"label": "情绪记忆", "data": DATA / "demo1"},
     "demo2": {"label": "记忆动力学", "data": DATA / "demo2"},
 }
+if not DYNAMICS_AVAILABLE:
+    BACKENDS.pop("demo2", None)
 for spec in BACKENDS.values():
     spec["data"].mkdir(exist_ok=True)
 
@@ -200,8 +207,9 @@ class InstrumentedDynamics:
 
 PROVIDERS = {
     "demo1": InstrumentedEmotion(APIProvider()),
-    "demo2": InstrumentedDynamics(DynamicsProvider()),
 }
+if DYNAMICS_AVAILABLE:
+    PROVIDERS["demo2"] = InstrumentedDynamics(DynamicsProvider())
 
 
 # ---------------------------------------------------------------- slim projections
@@ -741,5 +749,5 @@ if __name__ == "__main__":
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     server.daemon_threads = True
     print(f"harness on 0.0.0.0:{port} [{PROVIDERS['demo1'].mode}] "
-          f"demo1={DEMO1_PATH} demo2={DEMO2_PATH}", flush=True)
+          f"demo1={DEMO1_PATH}", flush=True)
     server.serve_forever()

@@ -1,6 +1,6 @@
-# agent-runtime.extra
+# e-m-c.extra
 
-两个 runtime 的聊天前端。回答在上面，runtime 自己的运行链折在下面 —— 参考 DeepSeek Harness
+e-m-c 的聊天前端。回答在上面，runtime 自己的运行链折在下面 —— 参考 DeepSeek Harness
 和 [assistant-ui 的 chain-of-thought 折叠](https://assistant-ui.com/docs/guides/chain-of-thought)：
 过程收成一行，展开才占地方，最终正文永远是主角。
 
@@ -8,19 +8,17 @@
 
 | 后端 | 包 | 看什么 |
 |---|---|---|
-| 情绪记忆 | `agent-runtime/demos/demo1-emotion-memory` | 检索打分、情绪漂移、替代、按需检索 |
-| 记忆动力学 | PR#7 的 `demos/demo2-memory-dynamics` | 衰减、权重、稳定性、激活 |
+| 情绪记忆 | `e-m-c/demos/demo1-emotion-memory` | 检索打分、情绪漂移、替代、按需检索 |
 
 ## 跑起来
 
 ```
 workspace/
-├── agent-runtime/demos/demo1-emotion-memory/agent_runtime   # demo1
-├── pr7-demo2/demos/demo2-memory-dynamics/                    # demo2（PR#7 分支的 worktree）
-└── agent-runtime.extra/                                      # 这个前端
+├── e-m-c/demos/demo1-emotion-memory/agent_runtime   # demo1
+└── e-m-c.extra/                                     # 这个前端
 ```
 
-路径都能用环境变量改：`AGENT_RUNTIME_PATH`、`DYNAMICS_RUNTIME_PATH`。
+路径都能用环境变量改：`AGENT_RUNTIME_PATH`。
 凭据从任何导出 `AGENT_*` 的 shell 片段来：
 
 ```bash
@@ -31,7 +29,7 @@ ENV_FILE=~/agent-env.sh PORT=8090 ./run.sh
 
 ## 界面上有什么
 
-侧栏顶部切换后端。一轮对话里，回答上方是一条可折叠的运行链，每一段本身也能单独折叠。
+侧栏列出会话，顶部只有「情绪记忆」一个后端。一轮对话里，回答上方是一条可折叠的运行链，每一段本身也能单独折叠。
 
 **情绪记忆**
 
@@ -44,21 +42,11 @@ ENV_FILE=~/agent-env.sh PORT=8090 ./run.sh
 | 写入 | 每条新记忆的 `write_strength`，以及它替代了谁 |
 | 提交 | step 变化、情绪漂移（ρ）、写入与替代的 id |
 
-**记忆动力学**
+**记忆动力学（已移除）**
 
-![记忆动力学的运行链](docs/run-chain-demo2.png)
-
-| 段 | 里面是什么 |
-|---|---|
-| 输入嵌入 | 同上 |
-| 衰减 | 每条记忆 `weight_before → weight_after` 和这一轮的有效衰减率 |
-| 检索 | `rel / w / score`，▸ 是进了上下文的前 `top_k` 条 |
-| 认知 | 引用了哪些记忆、想写入什么 |
-| 激活 | 被引用记忆的 `w` 和 `s` 前后值 |
-| 写入 | 新记忆，权重从 1.0、稳定性从 0 开始 |
-| 提交 | step、配置、库大小 |
-
-空库可以直接说话。demo2 的空状态有一个「预置 4 条示例记忆」，方便一进去就看到衰减。
+demo2 曾用来观察衰减、权重与稳定性。分支 `codex/demo2-memory-dynamics` 与 PR #7 已删除，
+代码、后端注册和界面入口都不再存在；这一节只在 Git 历史里保留。`docs/run-chain-demo2.png`
+是当时的截图，留作记录。
 
 ## 评分与评价
 
@@ -99,14 +87,13 @@ ENV_FILE=~/agent-env.sh PORT=8090 ./run.sh
 
 | 方法 | 路径 | 作用 |
 |---|---|---|
-| GET | `/api/threads?backend=demo1\|demo2` | 列出该后端的会话 |
-| POST | `/api/threads` | 新建会话，body `{backend, mode}` |
+| GET | `/api/threads?backend=demo1` | 列出该后端的会话 |
+| POST | `/api/threads` | 新建会话，body `{backend}` |
 | GET | `/api/threads/<id>` | 会话消息 + 当前库状态 |
 | POST | `/api/threads/<id>/messages` | 发一句话，返回 run id |
 | GET | `/api/threads/<id>/runs/<run>` | 轮询这一轮：状态、阶段、事件、trace |
 | POST | `/api/threads/<id>/ratings` | 批量：`{ratings: [{run, score, note}]}`，一次 1–200 条，只进日志 |
 | POST | `/api/threads/<id>/messages/<run>/rating` | 单条：`{score: 1-5, note}`，老接口，仍在 |
-| POST | `/api/threads/<id>/seed` | 仅 demo2：初始化记忆，仅限空库 |
 | GET | `/api/logs` | 最近的运行摘要与评分 |
 | GET | `/api/logs/export` | 全部 JSONL |
 
@@ -115,5 +102,5 @@ ENV_FILE=~/agent-env.sh PORT=8090 ./run.sh
 
 ## 审查用
 
-`?backend=demo2` 直接进记忆动力学，`?thread=<id>` 定位会话，`?expand=1` 展开所有运行链，
-`?all=1` 连每一段也一起展开，`?logs=1` 直接打开日志抽屉。
+`?thread=<id>` 定位会话，`?expand=1` 展开所有运行链，
+`?all=1` 连每一段也一起展开，`?logs=1` 直接打开日志抽屉。旧的 `?backend=demo2` 会回落到 demo1。

@@ -2,7 +2,8 @@
 
 const FLAGS = new URLSearchParams(location.search);
 const state = {
-  backend: FLAGS.get('backend') === 'demo2' ? 'demo2' : 'demo1',
+  // demo2 随分支删除，只跑 demo1；带 ?backend=demo2 的旧链接回落到 demo1。
+  backend: 'demo1',
   threads: [], current: null, thread: null, poll: null, busy: false,
   drafts: {},
 };
