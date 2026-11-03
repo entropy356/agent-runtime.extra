@@ -14,11 +14,11 @@ e-m-c 的聊天前端。回答在上面，runtime 自己的运行链折在下面
 
 ```
 workspace/
-├── e-m-c/demos/demo1-emotion-memory/agent_runtime   # demo1
-└── e-m-c.extra/                                     # 这个前端
+├── e-m-c/demos/demo1-emotion-memory/emc   # demo1
+└── e-m-c.extra/                           # 这个前端
 ```
 
-路径都能用环境变量改：`AGENT_RUNTIME_PATH`。
+路径都能用环境变量改：`EMC_PATH`（旧的 `AGENT_RUNTIME_PATH` 仍然认）。
 凭据从任何导出 `AGENT_*` 的 shell 片段来：
 
 ```bash

@@ -30,13 +30,14 @@ LOG_DIR = BASE / "logs"
 for folder in (DATA, LOG_DIR):
     folder.mkdir(exist_ok=True)
 
-DEMO1_PATH = os.environ.get("AGENT_RUNTIME_PATH") or str(
-    BASE.parent / "e-m-c" / "demos" / "demo1-emotion-memory")
+DEMO1_PATH = (os.environ.get("EMC_PATH")
+              or os.environ.get("AGENT_RUNTIME_PATH")  # 旧变量名，仍然认
+              or str(BASE.parent / "e-m-c" / "demos" / "demo1-emotion-memory"))
 if DEMO1_PATH not in sys.path:
     sys.path.insert(0, DEMO1_PATH)
 
-from agent_runtime.providers import APIProvider  # noqa: E402
-from agent_runtime.runtime import Runtime as EmotionRuntime  # noqa: E402
+from emc.providers import APIProvider  # noqa: E402
+from emc.runtime import Runtime as EmotionRuntime  # noqa: E402
 
 # demo2 的代码随分支一起删了，这里降级为可选：没有 memory_dynamics 就只跑 demo1。
 try:
